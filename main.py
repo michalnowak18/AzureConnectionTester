@@ -1,68 +1,55 @@
 import os
 import sys
-from azure.identity import DefaultAzureCredential, WorkloadIdentityCredential
-from azure.storage.blob import BlobServiceClient
-from azure.core.exceptions import AzureError, HttpResponseError
+from azure.identity import WorkloadIdentityCredential
 
-def test_blob_connectivity(storage_account_name: str) -> dict:
-    result = {
-        "resource": "Azure Blob Storage",
-        "account": storage_account_name,
-        "status": "FAIL",
-        "details": None,
-        "error": None,
-    }
+from testers import test_blob, test_keyvault
 
-    account_url = f"https://{storage_account_name}.blob.core.windows.net"
 
-    try:
-        # Reads AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE
-        # which are injected automatically by the AZWI mutating webhook.
-        credential = WorkloadIdentityCredential()
+def get_credential() -> WorkloadIdentityCredential:
+    return WorkloadIdentityCredential()
 
-        client = BlobServiceClient(account_url=account_url, credential=credential)
 
-        # Actual connectivity test: list containers (requires at minimum
-        # Storage Blob Data Reader on the storage account scope).
-        containers = list(client.list_containers(results_per_page=5))
+def print_result(result: dict) -> None:
+    symbol = "✅" if result["status"] == "OK" else "❌"
+    print(f"\n{symbol} [{result['status']}] {result['resource']} — {result['identifier']}")
 
-        result["status"] = "OK"
-        result["details"] = {
-            "containers_found": len(containers),
-            "container_names": [c["name"] for c in containers],
-        }
+    if result["details"]:
+        for key, value in result["details"].items():
+            if isinstance(value, list):
+                print(f"   {key}: {len(value)}")
+                for item in value:
+                    print(f"     • {item}")
+            else:
+                print(f"   {key}: {value}")
 
-    except HttpResponseError as e:
-        # Covers 403 Forbidden (wrong RBAC), 404 (wrong account name), etc.
-        result["error"] = f"HTTP {e.status_code}: {e.reason} — {e.message}"
+    if result["error"]:
+        print(f"   Error: {result['error']}")
 
-    except AzureError as e:
-        # Covers credential/token exchange failures (misconfigured FIC, wrong
-        # client ID annotation on the SA, token file not mounted, etc.)
-        result["error"] = f"Azure credential error: {str(e)}"
 
-    except Exception as e:
-        result["error"] = f"Unexpected error: {str(e)}"
+def main() -> None:
+    storage_account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    keyvault_name = os.getenv("AZURE_KEYVAULT_NAME")
 
-    return result
-
-if __name__ == "__main__":
-    storage_account = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
-
-    if not storage_account:
-        print("ERROR: AZURE_STORAGE_ACCOUNT_NAME environment variable not set.")
+    if not storage_account_name and not keyvault_name:
+        print("ERROR: At least one of AZURE_STORAGE_ACCOUNT_NAME or AZURE_KEYVAULT_NAME must be set.")
         sys.exit(1)
 
-    test_result = test_blob_connectivity(storage_account)
+    credential = get_credential()
 
-    status_symbol = "✅" if test_result["status"] == "OK" else "❌"
-    print(f"\n{status_symbol} [{test_result['status']}] {test_result['resource']} — {test_result['account']}")
+    tests = []
+    if storage_account_name:
+        tests.append(test_blob(credential, storage_account_name))
+    if keyvault_name:
+        tests.append(test_keyvault(credential, keyvault_name))
 
-    if test_result["details"]:
-        print(f"   Containers visible: {test_result['details']['containers_found']}")
-        for name in test_result["details"]["container_names"]:
-            print(f"     • {name}")
+    print("\n=== Azure Connectivity Test Results ===")
+    for result in tests:
+        print_result(result)
 
-    if test_result["error"]:
-        print(f"   Error: {test_result['error']}")
+    failed = [r for r in tests if r["status"] == "FAIL"]
+    print(f"\n{'All tests passed.' if not failed else f'{len(failed)} test(s) failed.'}")
+    sys.exit(1 if failed else 0)
 
+
+if __name__ == "__main__":
+    main()
