@@ -2,7 +2,7 @@ import os
 import sys
 from azure.identity import WorkloadIdentityCredential
 
-from testers import test_blob, test_keyvault
+from testers import test_blob, test_keyvault, test_postgres
 
 
 def get_credential() -> WorkloadIdentityCredential:
@@ -29,9 +29,12 @@ def print_result(result: dict) -> None:
 def main() -> None:
     storage_account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     keyvault_name = os.getenv("AZURE_KEYVAULT_NAME")
+    postgres_host = os.getenv("AZURE_POSTGRES_HOST")
+    postgres_db = os.getenv("AZURE_POSTGRES_DB")
+    postgres_user = os.getenv("AZURE_POSTGRES_USER")
 
-    if not storage_account_name and not keyvault_name:
-        print("ERROR: At least one of AZURE_STORAGE_ACCOUNT_NAME or AZURE_KEYVAULT_NAME must be set.")
+    if not any([storage_account_name, keyvault_name, postgres_host]):
+        print("ERROR: At least one of the variables must be set.")
         sys.exit(1)
 
     credential = get_credential()
@@ -41,6 +44,11 @@ def main() -> None:
         tests.append(test_blob(credential, storage_account_name))
     if keyvault_name:
         tests.append(test_keyvault(credential, keyvault_name))
+    if postgres_host:
+        if not postgres_db or not postgres_user:
+            print("ERROR: AZURE_POSTGRES_DB and AZURE_POSTGRES_USER are required when AZURE_POSTGRES_HOST is set.")
+            sys.exit(1)
+        tests.append(test_postgres(credential, postgres_host, postgres_db, postgres_user))
 
     print("\n=== Azure Connectivity Test Results ===")
     for result in tests:
