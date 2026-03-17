@@ -3,3 +3,4 @@ azure-identity>=1.25.2
 azure-storage-blob>=12.28.0
 azure-keyvault-secrets>=4.10.0
 psycopg2-binary>=2.9.11
+requests>=2.32.5

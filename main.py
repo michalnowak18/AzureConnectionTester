@@ -2,7 +2,7 @@ import os
 import sys
 from azure.identity import WorkloadIdentityCredential
 
-from testers import test_blob, test_keyvault, test_postgres
+from testers import test_blob, test_keyvault, test_postgres, test_acr
 
 
 def get_credential() -> WorkloadIdentityCredential:
@@ -32,6 +32,8 @@ def main() -> None:
     postgres_host = os.getenv("AZURE_POSTGRES_HOST")
     postgres_db = os.getenv("AZURE_POSTGRES_DB")
     postgres_user = os.getenv("AZURE_POSTGRES_USER")
+    acr_name = os.getenv("AZURE_ACR_NAME")
+    tenant_id = os.getenv("AZURE_TENANT_ID")
 
     if not any([storage_account_name, keyvault_name, postgres_host]):
         print("ERROR: At least one of the variables must be set.")
@@ -49,6 +51,11 @@ def main() -> None:
             print("ERROR: AZURE_POSTGRES_DB and AZURE_POSTGRES_USER are required when AZURE_POSTGRES_HOST is set.")
             sys.exit(1)
         tests.append(test_postgres(credential, postgres_host, postgres_db, postgres_user))
+    if acr_name:
+        if not tenant_id:
+            print("ERROR: AZURE_TENANT_ID is required for ACR test.")
+            sys.exit(1)
+        tests.append(test_acr(credential, acr_name, tenant_id))
 
     print("\n=== Azure Connectivity Test Results ===")
     for result in tests:
