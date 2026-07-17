@@ -1,20 +1,23 @@
+import os
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from azure.identity import WorkloadIdentityCredential
-from azure.core.exceptions import AzureError
-import os
+from fastapi import FastAPI, HTTPException
 
-from testers import test_blob, test_keyvault, test_postgres, test_acr, test_ado_pipeline
 from request_dto import BlobRequest, KeyVaultRequest, PostgresRequest, AcrRequest, AdoPipelineRequest
-
+from testers import test_blob, test_keyvault, test_postgres, test_acr, test_ado_pipeline
 
 # --- Credential is created once at startup and reused across all requests.
 # The SDK handles token caching and refresh internally.
 credential: Optional[WorkloadIdentityCredential] = None
 
+class HealthzFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/healthz" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(HealthzFilter())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,7 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Azure Connectivity Tester",
+    title="Azure Connection Tester",
     description="Tests connectivity and authentication to Azure resources using Workload Identity.",
     version="1.0.0",
     lifespan=lifespan,
