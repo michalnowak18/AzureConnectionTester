@@ -11,6 +11,7 @@ WORKDIR /app
 
 COPY --from=builder /app/packages /app/packages
 COPY main.py .
+COPY request_dto.py .
 COPY testers/ testers/
 
 ENV PYTHONPATH=/app/packages
