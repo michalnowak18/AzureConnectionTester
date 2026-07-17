@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: connection-tester
+  namespace: <your-namespace>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: connection-tester
+  template:
+    metadata:
+      labels:
+        app: connection-tester
+        azure.workload.identity/use: "true"   # AZWI webhook injection
+    spec:
+      serviceAccountName: <your-service-account>
+      containers:
+        - name: connection-tester
+          image: <your-acr-name>.azurecr.io/connection-tester:latest
+          ports:
+            - containerPort: 8000
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: connection-tester
+  namespace: <your-namespace>
+spec:
+  selector:
+    app: connection-tester
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP    # internal only — not exposed outside the cluster

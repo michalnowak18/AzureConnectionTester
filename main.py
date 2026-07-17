@@ -1,70 +1,150 @@
-import os
-import sys
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from azure.identity import WorkloadIdentityCredential
+from azure.core.exceptions import AzureError
+import os
 
-from testers import test_blob, test_keyvault, test_postgres, test_acr
-
-
-def get_credential() -> WorkloadIdentityCredential:
-    return WorkloadIdentityCredential()
+from testers import test_blob, test_keyvault, test_postgres, test_acr, test_ado_pipeline
 
 
-def print_result(result: dict) -> None:
-    symbol = "✅" if result["status"] == "OK" else "❌"
-    print(f"\n{symbol} [{result['status']}] {result['resource']} — {result['identifier']}")
-
-    if result["details"]:
-        for key, value in result["details"].items():
-            if isinstance(value, list):
-                print(f"   {key}: {len(value)}")
-                for item in value:
-                    print(f"     • {item}")
-            else:
-                print(f"   {key}: {value}")
-
-    if result["error"]:
-        print(f"   Error: {result['error']}")
+# --- Credential is created once at startup and reused across all requests.
+# The SDK handles token caching and refresh internally.
+credential: Optional[WorkloadIdentityCredential] = None
 
 
-def main() -> None:
-    storage_account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
-    keyvault_name = os.getenv("AZURE_KEYVAULT_NAME")
-    postgres_host = os.getenv("AZURE_POSTGRES_HOST")
-    postgres_db = os.getenv("AZURE_POSTGRES_DB")
-    postgres_user = os.getenv("AZURE_POSTGRES_USER")
-    acr_name = os.getenv("AZURE_ACR_NAME")
-    tenant_id = os.getenv("AZURE_TENANT_ID")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global credential
+    try:
+        credential = WorkloadIdentityCredential()
+    except Exception as e:
+        # Fail fast at startup if credential cannot be initialised
+        raise RuntimeError(f"Failed to initialise WorkloadIdentityCredential: {e}")
+    yield
+    # Nothing to clean up — credential holds no persistent connections
 
-    if not any([storage_account_name, keyvault_name, postgres_host]):
-        print("ERROR: At least one of the variables must be set.")
-        sys.exit(1)
 
-    credential = get_credential()
+app = FastAPI(
+    title="Azure Connectivity Tester",
+    description="Tests connectivity and authentication to Azure resources using Workload Identity.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
-    tests = []
-    if storage_account_name:
-        tests.append(test_blob(credential, storage_account_name))
-    if keyvault_name:
-        tests.append(test_keyvault(credential, keyvault_name))
-    if postgres_host:
-        if not postgres_db or not postgres_user:
-            print("ERROR: AZURE_POSTGRES_DB and AZURE_POSTGRES_USER are required when AZURE_POSTGRES_HOST is set.")
-            sys.exit(1)
-        tests.append(test_postgres(credential, postgres_host, postgres_db, postgres_user))
-    if acr_name:
+
+# --- Request models ---
+
+class BlobRequest(BaseModel):
+    storage_account_name: str
+
+class KeyVaultRequest(BaseModel):
+    keyvault_name: str
+
+class PostgresRequest(BaseModel):
+    host: str
+    database: str
+    username: str
+    port: int = 5432
+
+class AcrRequest(BaseModel):
+    registry_name: str
+    tenant_id: str = None   # falls back to AZURE_TENANT_ID env var if not provided
+
+class AdoPipelineRequest(BaseModel):
+    organization: str
+    project: str
+    pipeline_id: int
+    branch: str = "main"
+    parameters: dict = {}
+
+
+# --- Health check ---
+
+@app.get("/healthz")
+def health():
+    return {"status": "ok"}
+
+
+# --- Test endpoints ---
+
+@app.post("/test/blob")
+def test_blob_endpoint(request: BlobRequest):
+    result = test_blob(credential, request.storage_account_name)
+    if result["status"] == "FAIL":
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/test/keyvault")
+def test_keyvault_endpoint(request: KeyVaultRequest):
+    result = test_keyvault(credential, request.keyvault_name)
+    if result["status"] == "FAIL":
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/test/postgres")
+def test_postgres_endpoint(request: PostgresRequest):
+    result = test_postgres(credential, request.host, request.database, request.username, request.port)
+    if result["status"] == "FAIL":
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/test/acr")
+def test_acr_endpoint(request: AcrRequest):
+    tenant_id = request.tenant_id or os.getenv("AZURE_TENANT_ID")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required either in the request body or as AZURE_TENANT_ID env var.")
+    result = test_acr(credential, request.registry_name, tenant_id)
+    if result["status"] == "FAIL":
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/trigger/pipeline")
+def trigger_pipeline_endpoint(request: AdoPipelineRequest):
+    result = test_ado_pipeline(
+        credential,
+        request.organization,
+        request.project,
+        request.pipeline_id,
+        request.branch,
+        request.parameters,
+    )
+    if result["status"] == "FAIL":
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@app.post("/test/all")
+def test_all_endpoint(
+    blob: Optional[BlobRequest] = None,
+    keyvault: Optional[KeyVaultRequest] = None,
+    postgres: Optional[PostgresRequest] = None,
+    acr: Optional[AcrRequest] = None,
+):
+    if not any([blob, keyvault, postgres, acr]):
+        raise HTTPException(status_code=400, detail="At least one resource must be specified.")
+
+    results = []
+    if blob:
+        results.append(test_blob(credential, blob.storage_account_name))
+    if keyvault:
+        results.append(test_keyvault(credential, keyvault.keyvault_name))
+    if postgres:
+        results.append(test_postgres(credential, postgres.host, postgres.database, postgres.username, postgres.port))
+    if acr:
+        tenant_id = acr.tenant_id or os.getenv("AZURE_TENANT_ID")
         if not tenant_id:
-            print("ERROR: AZURE_TENANT_ID is required for ACR test.")
-            sys.exit(1)
-        tests.append(test_acr(credential, acr_name, tenant_id))
+            raise HTTPException(status_code=400, detail="tenant_id is required for ACR test.")
+        results.append(test_acr(credential, acr.registry_name, tenant_id))
 
-    print("\n=== Azure Connectivity Test Results ===")
-    for result in tests:
-        print_result(result)
-
-    failed = [r for r in tests if r["status"] == "FAIL"]
-    print(f"\n{'All tests passed.' if not failed else f'{len(failed)} test(s) failed.'}")
-    sys.exit(1 if failed else 0)
-
-
-if __name__ == "__main__":
-    main()
+    failed = [r for r in results if r["status"] == "FAIL"]
+    return {
+        "summary": "All tests passed." if not failed else f"{len(failed)} test(s) failed.",
+        "results": results,
+    }
